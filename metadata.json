@@ -1,0 +1,6 @@
+{
+  "name": "Collective AI Company Bible",
+  "description": "An interactive full-lifecycle operating desk, division encyclopedia, physical hardware simulator, and AI assistant interface for Collective AI Inc.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
