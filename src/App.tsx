@@ -20,7 +20,8 @@ import {
   XAxis,
   YAxis,
   Tooltip,
-  CartesianGrid
+  CartesianGrid,
+  ReferenceLine
 } from "recharts";
 
 import CommandRail from "./components/CommandRail";
@@ -41,6 +42,8 @@ import PeopleView from "./components/PeopleView";
 import AgentMixer from "./components/AgentMixer";
 import IntegrationsView from "./components/IntegrationsView";
 import PricingView from "./components/PricingView";
+import CinematicLoader from "./components/CinematicLoader";
+import BibleLandingPage from "./components/BibleLandingPage";
 
 interface LogEvent {
   time: string;
@@ -96,21 +99,53 @@ const CustomChartTooltip = ({ active, payload, label }: any) => {
       <div className="bg-[#111827] border border-[#1A2540] rounded p-3 shadow-2xl backdrop-blur-xs select-none min-w-[210px] text-xs">
         <div className="text-[10px] font-mono text-[#8B9BAE] uppercase mb-1.5 border-b border-[#1A2540] pb-1">{label}</div>
         
-        <div className="space-y-1">
+        <div className="space-y-1.5">
           {payload.map((p: any, idx: number) => {
             if (p.value === undefined || p.value === null) return null;
             const isForecast = p.name === "forecast" || p.dataKey === "forecast";
             const isCompareValue = p.name === "compareInference" || p.dataKey === "compareInference";
+            const isInference = p.name === "inference" || p.dataKey === "inference" || (!isForecast && !isCompareValue);
             
             const labelStr = isForecast ? "Forecast" : isCompareValue ? "Prev Period Baseline" : "Inference";
             const color = isForecast ? "#D4A843" : isCompareValue ? "#A855F7" : "#00D9B5";
+            
+            let trendIndicator = null;
+            if (isInference && data.inferenceTrend) {
+              if (data.inferenceTrend === "up") {
+                trendIndicator = (
+                  <span className="text-[#00D9B5] ml-1.5 font-bold" title="Trending Upwards">↑</span>
+                );
+              } else if (data.inferenceTrend === "down") {
+                trendIndicator = (
+                  <span className="text-red-400 ml-1.5 font-bold" title="Trending Downwards">↓</span>
+                );
+              } else if (data.inferenceTrend === "flat") {
+                trendIndicator = (
+                  <span className="text-gray-500 ml-1.5 font-semibold" title="Stable">→</span>
+                );
+              }
+            }
+            
             return (
-              <div key={idx} className="flex items-center justify-between gap-4 text-[11px]">
-                <span className="font-mono text-[9px] uppercase tracking-wider flex items-center gap-1.5" style={{ color }}>
-                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
-                  {labelStr}
-                </span>
-                <span className="font-mono font-bold text-white">{p.value.toFixed(2)}M</span>
+              <div key={idx} className="space-y-1">
+                <div className="flex items-center justify-between gap-4 text-[11px]">
+                  <span className="font-mono text-[9px] uppercase tracking-wider flex items-center gap-1.5" style={{ color }}>
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
+                    {labelStr}
+                  </span>
+                  <span className="font-mono font-bold text-white flex items-center">
+                    {p.value.toFixed(2)}M
+                    {trendIndicator}
+                  </span>
+                </div>
+                {isInference && typeof data.confidenceScore === "number" && (
+                  <div className="flex items-center justify-between text-[10px] font-mono pl-3 text-gray-400">
+                    <span className="uppercase text-[8px] tracking-wider text-gray-500">Confidence Score:</span>
+                    <span className={`font-semibold ${data.confidenceScore > 85 ? "text-[#00D9B5]" : data.confidenceScore > 65 ? "text-[#D4A843]" : "text-red-400"}`}>
+                      {data.confidenceScore.toFixed(1)}%
+                    </span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -134,6 +169,8 @@ const CustomChartTooltip = ({ active, payload, label }: any) => {
 };
 
 export default function App() {
+  const [introCompleted, setIntroCompleted] = useState(false);
+  const [landingCompleted, setLandingCompleted] = useState(false);
   const [activeView, setActiveView] = useState("command-center");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLatticeEnabled, setIsLatticeEnabled] = useState(true);
@@ -320,21 +357,77 @@ export default function App() {
     const variance = activeDiffs.reduce((sum, v) => sum + Math.pow(v - meanDiff, 2), 0) / activeDiffs.length;
     const stdDev = Math.sqrt(variance);
 
-    return withMA.map(item => {
+    return withMA.map((item, idx) => {
       if (typeof item.inference !== "number") return item;
       
       // Highlight points that deviate by more than 2.5 standard deviations from the moving average
       const isAnomaly = stdDev > 0.02 && item.diff >= 2.5 * stdDev;
+
+      // Calculate confidence score based on the variance of the surrounding data points
+      const mathIdx = mathPoints.findIndex(p => p.day === item.day);
+      const surroundingVals: number[] = [item.inference];
+      if (mathIdx > 0) surroundingVals.push(mathPoints[mathIdx - 1].inference);
+      if (mathIdx > 1) surroundingVals.push(mathPoints[mathIdx - 2].inference);
+      if (mathIdx < mathPoints.length - 1) surroundingVals.push(mathPoints[mathIdx + 1].inference);
+      if (mathIdx < mathPoints.length - 2) surroundingVals.push(mathPoints[mathIdx + 2].inference);
+
+      const localMean = surroundingVals.reduce((sum, v) => sum + v, 0) / surroundingVals.length;
+      const localVariance = surroundingVals.reduce((sum, v) => sum + Math.pow(v - localMean, 2), 0) / surroundingVals.length;
+      const localStdDev = Math.sqrt(localVariance);
+
+      let computedConfidence = 100 - (localStdDev * 140);
+      if (isAnomaly) {
+        computedConfidence -= 18; // penalty for anomaly variance
+      }
+      const confidenceScore = Math.max(42.0, Math.min(99.4, computedConfidence));
+
+      // Calculate trend relative to previous data point with valid inference value
+      let trend: "up" | "down" | "flat" | null = null;
+      let prevInferenceVal: number | null = null;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (typeof withMA[i].inference === "number") {
+          prevInferenceVal = withMA[i].inference as number;
+          break;
+        }
+      }
+      if (prevInferenceVal !== null && typeof item.inference === "number") {
+        if (item.inference > prevInferenceVal) {
+          trend = "up";
+        } else if (item.inference < prevInferenceVal) {
+          trend = "down";
+        } else {
+          trend = "flat";
+        }
+      }
       
       return {
         ...item,
         isAnomaly,
         stdDev,
         meanDiff,
-        diffFromMA: item.diff
+        diffFromMA: item.diff,
+        inferenceTrend: trend,
+        confidenceScore
       };
     });
   }, [inferenceChartData, isCompareMode, selectedRange]);
+
+  // Calculate average 2.5 SD threshold across visible non-anomaly timeline points
+  const averageThreshold = React.useMemo(() => {
+    const points = enrichedInferenceChartData.filter(d => typeof d.inference === "number");
+    if (points.length === 0) return 3.0;
+
+    // Find non-anomaly points to compute baseline moving average
+    const nonAnomalies = points.filter(p => !p.isAnomaly);
+    const baselinePoints = nonAnomalies.length > 0 ? nonAnomalies : points;
+
+    // Calculate average baseline moving average
+    const avgMA = baselinePoints.reduce((sum, p) => sum + (p.movingAvg || 2.22), 0) / baselinePoints.length;
+    // Get stdDev from computed dataset
+    const activeStdDev = points[0]?.stdDev || 0.2;
+
+    return avgMA + 2.5 * activeStdDev;
+  }, [enrichedInferenceChartData]);
 
   const handleRangeChange = (range: "24h" | "7d" | "30d") => {
     setSelectedRange(range);
@@ -444,6 +537,36 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen bg-[#050A18] text-[#8B9BAE] overflow-hidden flex flex-col font-sans select-none relative">
+      
+      <AnimatePresence mode="wait">
+        {!introCompleted ? (
+          <motion.div
+            key="cinematic-loader-outer"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.8 }}
+            className="fixed inset-0 z-50 overflow-hidden"
+          >
+            <CinematicLoader onComplete={() => setIntroCompleted(true)} />
+          </motion.div>
+        ) : !landingCompleted ? (
+          <motion.div
+            key="bible-landing-outer"
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 1.03 }}
+            transition={{ duration: 0.6 }}
+            className="fixed inset-0 z-50 overflow-y-auto h-screen bg-[#050A18]"
+          >
+            <div className="min-h-max w-full flex flex-col">
+              <BibleLandingPage onEnterApp={() => setLandingCompleted(true)} />
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+      
+      {introCompleted && landingCompleted && (
+        <>
       
       {/* Top Banner Warning alerts (Dismissible) */}
       {!isAlertDismissed && (
@@ -908,6 +1031,21 @@ export default function App() {
                               allowDataOverflow={true}
                             />
                             <Tooltip content={<CustomChartTooltip />} />
+                            <ReferenceLine
+                              y={averageThreshold}
+                              stroke="#EF4444"
+                              strokeWidth={1}
+                              strokeDasharray="4 4"
+                              label={{
+                                value: "2.5 SD ANOMALY THRESHOLD",
+                                fill: "#EF4444",
+                                fontSize: 8,
+                                fontFamily: "monospace",
+                                fontWeight: "bold",
+                                position: "top",
+                                offset: 5
+                              }}
+                            />
                             <Area
                               type="monotone"
                               dataKey="inference"
@@ -1320,6 +1458,9 @@ export default function App() {
             </form>
           </div>
         </div>
+      )}
+
+        </>
       )}
 
     </div>
